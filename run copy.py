@@ -21,7 +21,8 @@ def project_python():
 
 def check_dependencies(python):
     result = subprocess.run(
-        [python, "-c", "import uvicorn, fastapi, streamlit, requests, graphviz"],
+        # Importing streamlit.components.v2 (used by the clickable graph) also rejects Streamlit < 1.51.
+        [python, "-c", "import uvicorn, fastapi, requests, streamlit.components.v2"],
         cwd=ROOT, capture_output=True, text=True,
     )
     if result.returncode:

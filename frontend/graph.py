@@ -1,0 +1,135 @@
+"""Interactive card graph: a tidy tree layout drawn by a small Streamlit component.
+
+The layout is computed here, in plain Python, so it is deterministic and unit
+testable. The browser side (graph.js) only draws the positioned nodes and
+reports clicks back to Python; no Graphviz installation is needed.
+"""
+import textwrap
+from pathlib import Path
+
+import streamlit as st
+
+from backend.models import Deck
+
+NODE_WIDTH = 184
+LINE_HEIGHT = 16
+MAX_LINES = 3
+CHARS_PER_LINE = 23
+NODE_HEIGHT = MAX_LINES * LINE_HEIGHT + 20
+SIBLING_GAP = 20
+LEVEL_GAP = 56
+MARGIN = 16
+
+_ASSETS = Path(__file__).resolve().parent
+_component = st.components.v2.component(
+    "dfcards_card_graph",
+    html='<div class="dfc-graph" role="group" aria-label="Card graph"></div>',
+    css=(_ASSETS / "graph.css").read_text(encoding="utf-8"),
+    js=(_ASSETS / "graph.js").read_text(encoding="utf-8"),
+)
+
+
+def wrap_label(text, width=CHARS_PER_LINE, max_lines=MAX_LINES):
+    """Wrap text into at most ``max_lines`` lines, marking truncation with an ellipsis."""
+    lines = textwrap.wrap(" ".join(text.split()), width) or [""]
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1][: width - 1].rstrip() + "…"
+    return lines
+
+
+def _place(subtrees):
+    """Pack subtree contours left to right without overlap.
+
+    Each contour lists the (left, right) extent of one depth level relative to
+    its subtree root. Returns each subtree's offset, centred on the group
+    midpoint, plus the merged contour of the group.
+    """
+    shifts, merged = [], []
+    for contour in subtrees:
+        shared = min(len(merged), len(contour))
+        shift = max((merged[d][1] - contour[d][0] + SIBLING_GAP for d in range(shared)), default=0)
+        for d, (left, right) in enumerate(contour):
+            if d < len(merged):
+                merged[d] = (merged[d][0], right + shift)
+            else:
+                merged.append((left + shift, right + shift))
+        shifts.append(shift)
+    middle = (shifts[0] + shifts[-1]) / 2
+    return [s - middle for s in shifts], [(l - middle, r - middle) for l, r in merged]
+
+
+def layout(deck: Deck, selected=None):
+    """Position every card in a top-down tree and return data for graph.js."""
+    kids = {card.id: [] for card in deck.cards}
+    roots = []
+    for card in sorted(deck.cards, key=lambda c: c.order):
+        (kids[card.parent_id] if card.parent_id else roots).append(card)
+    if not roots:
+        return {"nodes": [], "edges": [], "width": 0, "height": 0}
+
+    # Post-order without recursion: decks may be deeper than Python's recursion limit.
+    contours, offsets = {}, {}
+    stack = [(card, False) for card in reversed(roots)]
+    while stack:
+        card, expanded = stack.pop()
+        if not expanded:
+            stack.append((card, True))
+            stack.extend((child, False) for child in reversed(kids[card.id]))
+            continue
+        half = NODE_WIDTH / 2
+        own = [(-half, half)]
+        if kids[card.id]:
+            shifts, below = _place([contours.pop(c.id) for c in kids[card.id]])
+            offsets.update({c.id: s for c, s in zip(kids[card.id], shifts)})
+            own += below
+        contours[card.id] = own
+
+    root_shifts, forest = _place([contours.pop(r.id) for r in roots])
+    left = min(l for l, _ in forest)
+    x, depth, ordered = {}, {}, []
+    for root, shift in zip(roots, root_shifts):
+        x[root.id], depth[root.id] = shift - left + MARGIN, 0
+    # Emit nodes in preorder so keyboard Tab order matches study and reading order.
+    stack = list(reversed(roots))
+    while stack:
+        card = stack.pop()
+        ordered.append(card)
+        for child in kids[card.id]:
+            x[child.id] = x[card.id] + offsets[child.id]
+            depth[child.id] = depth[card.id] + 1
+        stack.extend(reversed(kids[card.id]))
+
+    nodes = [{
+        "id": str(card.id),
+        "x": round(x[card.id] - NODE_WIDTH / 2, 1),
+        "y": MARGIN + depth[card.id] * (NODE_HEIGHT + LEVEL_GAP),
+        "lines": wrap_label(card.question),
+        "title": card.question,
+        "selected": str(card.id) == selected,
+    } for card in ordered]
+    edges = [[str(card.parent_id), str(card.id)] for card in deck.cards if card.parent_id]
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "width": round(max(r for _, r in forest) - left + 2 * MARGIN, 1),
+        "height": MARGIN * 2 + (max(depth.values()) + 1) * NODE_HEIGHT + max(depth.values()) * LEVEL_GAP,
+        "node_width": NODE_WIDTH,
+        "node_height": NODE_HEIGHT,
+        "line_height": LINE_HEIGHT,
+        "selected": selected,
+    }
+
+
+def card_graph(deck: Deck, selected, key, on_select):
+    """Draw the deck graph; ``on_select`` runs before the rerun that follows a node click.
+
+    Read the clicked card ID inside the callback with ``clicked_card(key)``.
+    """
+    return _component(key=key, data=layout(deck, selected), on_select_change=on_select)
+
+
+def clicked_card(key):
+    """Return the card ID sent by the most recent node click, if any."""
+    state = st.session_state.get(key)
+    return state.get("select") if state else None

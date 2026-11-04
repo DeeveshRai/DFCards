@@ -1,0 +1,60 @@
+/* Colours follow the active Streamlit theme; fallbacks match the light theme. */
+.dfc-graph {
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid var(--st-border-color, #d5dae5);
+  border-radius: var(--st-base-radius, 0.5rem);
+  background: var(--st-background-color, #ffffff);
+}
+
+.dfc-canvas {
+  display: block;
+  margin: 0 auto; /* Centre graphs narrower than the frame. */
+  font-family: var(--st-font, "Source Sans Pro", Arial, sans-serif);
+  font-size: 13px;
+}
+
+.dfc-edge {
+  fill: none;
+  stroke: var(--st-gray-color, #94a3b8);
+  stroke-width: 1.4;
+}
+
+.dfc-arrow {
+  fill: var(--st-gray-color, #94a3b8);
+}
+
+.dfc-node {
+  cursor: pointer;
+  outline: none;
+}
+
+.dfc-node rect {
+  fill: var(--st-secondary-background-color, #f1f5f9);
+  stroke: var(--st-border-color, #cbd5e1);
+  stroke-width: 1.2;
+  transition: fill 120ms, stroke 120ms;
+}
+
+.dfc-node text {
+  fill: var(--st-text-color, #31333f);
+  text-anchor: middle;
+  pointer-events: none;
+  user-select: none;
+}
+
+.dfc-node:hover rect {
+  stroke: var(--st-primary-color, #2563eb);
+}
+
+.dfc-node:focus-visible rect {
+  stroke: var(--st-primary-color, #2563eb);
+  stroke-width: 3;
+}
+
+.dfc-node.selected rect {
+  fill: #bfdbfe;
+  fill: color-mix(in srgb, var(--st-primary-color, #2563eb) 22%, var(--st-background-color, #ffffff));
+  stroke: var(--st-primary-color, #2563eb);
+  stroke-width: 2.4;
+}

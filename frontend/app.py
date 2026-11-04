@@ -1,15 +1,16 @@
 import os
 import sys
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import graphviz
 import requests
 import streamlit as st
 
 from backend.models import Deck
 from backend.traversal import StudySession, children, preorder
+from frontend.graph import card_graph, clicked_card
 
 API = os.getenv("DFCARDS_API_URL", "http://127.0.0.1:8000")
 st.set_page_config(page_title="DFCards", page_icon="🌳", layout="wide")
@@ -85,63 +86,108 @@ def create_card(deck, parent=None):
             st.rerun()
 
 
+def open_card(deck_id, card_id, mode=None):
+    """Select a card and present it fresh: answer hidden and no previous attempt."""
+    st.session_state[f"selected_{deck_id}"] = card_id
+    st.session_state[f"revealed_{deck_id}"] = None
+    st.session_state[f"attempt_{card_id}"] = ""
+    if mode:
+        st.session_state[f"mode_{deck_id}"] = mode
+
+
+def open_from_graph(deck_id):
+    # Runs as a callback, before the rerun, so the graph and panel agree.
+    card_id = clicked_card(f"graph_{deck_id}")
+    if card_id:
+        open_card(deck_id, card_id, "Answer")
+
+
 def editor(deck):
     st.title(deck.name)
-    st.caption("Editor · select a card alongside the graph to edit it.")
-    graph_column, edit_column = st.columns([3, 2])
+    st.caption("Editor · click a card in the graph to open it, answer it, or edit it.")
+    graph_column, card_column = st.columns([3, 2])
     lookup = {str(c.id): c for c in deck.cards}
     ordered = [str(cid) for cid in preorder(deck)]
-    key = f"selected_{deck.id}"
+    key, mode_key = f"selected_{deck.id}", f"mode_{deck.id}"
+    st.session_state.setdefault(mode_key, "Edit")
     pending = st.session_state.pop(f"pending_{deck.id}", None)
     if pending in ordered:
         st.session_state[key] = pending
+        st.session_state[mode_key] = "Edit"  # Keep authoring the card just created.
     if st.session_state.get(key) not in ordered:
         st.session_state[key] = ordered[0] if ordered else None
     with graph_column:
-        graph = graphviz.Digraph()
-        graph.attr(rankdir="TB")
-        graph.attr("node", shape="box", style="rounded,filled", fontname="Arial")
-        for card in deck.cards:
-            text = card.question[:65] + ("…" if len(card.question) > 65 else "")
-            graph.node(str(card.id), graphviz.escape(text), fillcolor="#bfdbfe" if str(card.id) == st.session_state[key] else "#f1f5f9")
-            if card.parent_id:
-                graph.edge(str(card.parent_id), str(card.id))
         if deck.cards:
-            st.graphviz_chart(graph, use_container_width=True)
+            card_graph(deck, st.session_state[key], key=f"graph_{deck.id}",
+                       on_select=partial(open_from_graph, str(deck.id)))
+            st.caption("Keyboard: Tab to a card and press Enter to open it.")
         else:
             st.info("Start with a root card, then add children to break down the idea.")
         with st.expander("Add root card", expanded=not deck.cards):
             create_card(deck)
-    with edit_column:
+    with card_column:
         if not ordered:
             return
         selected = st.selectbox("Select card", ordered, format_func=lambda cid: lookup[cid].question, key=key)
         card = lookup[selected]
-        st.subheader("Edit card")
-        with st.form(f"edit_{card.id}"):
-            question = st.text_area("Full question", value=card.question)
-            answer = st.text_area("Full answer", value=card.answer)
-            # Exclude the whole subtree from potential parents.
-            excluded, stack = set(), [card.id]
-            while stack:
-                current = stack.pop()
-                excluded.add(current)
-                stack.extend(c.id for c in children(deck, current))
-            parents = [None] + [cid for cid in ordered if lookup[cid].id not in excluded]
-            parent_value = str(card.parent_id) if card.parent_id else None
-            parent = st.selectbox("Parent", parents, index=parents.index(parent_value), format_func=lambda cid: "Root (no parent)" if cid is None else lookup[cid].question)
-            order = st.number_input("Sibling position (zero-based)", min_value=0, value=card.order, step=1)
-            st.caption("When changing parent, choose a position within the new sibling group.")
-            if st.form_submit_button("Save changes", type="primary"):
-                api("PATCH", f"/decks/{deck.id}/cards/{card.id}", json={"question": question, "answer": answer, "parent_id": parent, "order": order})
+        mode = st.radio("Card view", ["Answer", "Edit"], key=mode_key, horizontal=True, label_visibility="collapsed")
+        if mode == "Answer":
+            answer_card(deck, card, lookup)
+        else:
+            edit_card(deck, card, lookup, ordered)
+
+
+def answer_card(deck, card, lookup):
+    revealed_key = f"revealed_{deck.id}"
+    ancestors, parent = [], card.parent_id
+    while parent is not None:
+        ancestors.append(lookup[str(parent)].question)
+        parent = lookup[str(parent)].parent_id
+    if ancestors:
+        st.caption(" › ".join(reversed(ancestors)))
+    with st.container(border=True):
+        st.subheader(card.question)
+        st.text_area("Your answer", key=f"attempt_{card.id}",
+                     placeholder="Optional: write your answer, then reveal it to compare.")
+        if st.session_state.get(revealed_key) != str(card.id):
+            if st.button("Reveal answer", type="primary", key=f"reveal_{card.id}"):
+                st.session_state[revealed_key] = str(card.id)
                 st.rerun()
-        with st.expander("Add child", expanded=True):
-            create_card(deck, card.id)
-        with st.expander("Delete card"):
-            confirm = st.checkbox(f"Delete this card and its descendants ({len(excluded)} cards)", key=f"delete_confirm_{card.id}")
-            if st.button("Delete card and descendants", disabled=not confirm):
-                api("DELETE", f"/decks/{deck.id}/cards/{card.id}")
+        else:
+            st.caption("Answer")
+            st.write(card.answer)
+            if st.button("Hide answer", key=f"hide_{card.id}"):
+                st.session_state[revealed_key] = None
                 st.rerun()
+    st.caption("Choose Edit above to change this card, add a child, or delete it.")
+
+
+def edit_card(deck, card, lookup, ordered):
+    st.subheader("Edit card")
+    with st.form(f"edit_{card.id}"):
+        question = st.text_area("Full question", value=card.question)
+        answer = st.text_area("Full answer", value=card.answer)
+        # Exclude the whole subtree from potential parents.
+        excluded, stack = set(), [card.id]
+        while stack:
+            current = stack.pop()
+            excluded.add(current)
+            stack.extend(c.id for c in children(deck, current))
+        parents = [None] + [cid for cid in ordered if lookup[cid].id not in excluded]
+        parent_value = str(card.parent_id) if card.parent_id else None
+        parent = st.selectbox("Parent", parents, index=parents.index(parent_value), format_func=lambda cid: "Root (no parent)" if cid is None else lookup[cid].question)
+        order = st.number_input("Sibling position (zero-based)", min_value=0, value=card.order, step=1)
+        st.caption("When changing parent, choose a position within the new sibling group.")
+        if st.form_submit_button("Save changes", type="primary"):
+            api("PATCH", f"/decks/{deck.id}/cards/{card.id}", json={"question": question, "answer": answer, "parent_id": parent, "order": order})
+            st.rerun()
+    with st.expander("Add child", expanded=True):
+        create_card(deck, card.id)
+    with st.expander("Delete card"):
+        confirm = st.checkbox(f"Delete this card and its descendants ({len(excluded)} cards)", key=f"delete_confirm_{card.id}")
+        if st.button("Delete card and descendants", disabled=not confirm):
+            api("DELETE", f"/decks/{deck.id}/cards/{card.id}")
+            st.rerun()
 
 
 def study(deck):
