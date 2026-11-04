@@ -16,19 +16,29 @@ API = os.getenv("DFCARDS_API_URL", "http://127.0.0.1:8000")
 st.set_page_config(page_title="DFCards", page_icon="🌳", layout="wide")
 
 
-def api(method, path, **kwargs):
+class ApiError(Exception):
+    """A backend failure, with a message suitable for showing to the user."""
+
+
+def request_api(method, path, **kwargs):
     try:
         response = requests.request(method, API + path, timeout=10, **kwargs)
-        if not response.ok:
-            try:
-                detail = response.json().get("detail", response.text)
-            except ValueError:
-                detail = response.text
-            st.error(f"Could not save or load: {detail}")
-            st.stop()
-        return response.json() if response.content else None
     except requests.RequestException:
-        st.error("Backend unavailable. Start the application with python run.py.")
+        raise ApiError("Backend unavailable. Start the application with python run.py.") from None
+    if not response.ok:
+        try:
+            detail = response.json().get("detail", response.text)
+        except ValueError:
+            detail = response.text
+        raise ApiError(f"Could not save or load: {detail}")
+    return response.json() if response.content else None
+
+
+def api(method, path, **kwargs):
+    try:
+        return request_api(method, path, **kwargs)
+    except ApiError as exc:
+        st.error(str(exc))
         st.stop()
 
 
@@ -72,18 +82,62 @@ def library():
                     st.rerun()
 
 
+MODES = {"Answer": ":material/quiz: Answer", "Edit": ":material/edit: Edit", "Add child": ":material/add: Add child"}
+
+
+def new_card_keys(deck_id, parent):
+    """Widget keys for a new-card form.
+
+    A successful add moves to fresh keys, which reliably empties the form in the
+    browser. (Assigning "" to the old keys only changes what is displayed; the
+    browser would still resubmit the previous text.) Failed adds keep the keys,
+    so the typed text survives.
+    """
+    form = f"new_{deck_id}_{parent}"
+    generation = st.session_state.setdefault(f"{form}_generation", 0)
+    return form, f"{form}_question_{generation}", f"{form}_answer_{generation}"
+
+
+def submit_new_card(deck_id, parent):
+    """Form callback: create the card, keeping the typed text if anything fails."""
+    form, question_key, answer_key = new_card_keys(deck_id, parent)
+    question = st.session_state.get(question_key, "").strip()
+    answer = st.session_state.get(answer_key, "").strip()
+    if not question or not answer:
+        st.session_state[f"{form}_error"] = "Enter both a question and an answer."
+        if parent:
+            st.session_state[f"focus_{deck_id}"] = "answer" if question else "question"
+        return
+    try:
+        card = request_api("POST", f"/decks/{deck_id}/cards",
+                           json={"question": question, "answer": answer, "parent_id": parent})
+    except ApiError as exc:
+        st.session_state[f"{form}_error"] = str(exc)
+        return
+    st.session_state[f"{form}_generation"] += 1
+    st.session_state[f"recent_{deck_id}"] = card["id"]
+    st.session_state[f"focus_{deck_id}"] = "question"
+    if parent:
+        # The parent stays selected so several children can be added in a row.
+        # (An inline note rather than st.toast: a toast raised while the previous
+        # one is still showing is silently dropped.)
+        st.session_state[f"{form}_added"] = question
+    else:
+        open_card(deck_id, card["id"], "Add child")
+
+
 def create_card(deck, parent=None):
-    label = "Add Child Card" if parent else "Create root card"
-    with st.form(f"new_{deck.id}_{parent}", clear_on_submit=True):
-        question = st.text_area("Question")
-        answer = st.text_area("Answer")
-        if st.form_submit_button(label, type="primary"):
-            result = api("POST", f"/decks/{deck.id}/cards", json={
-                "question": question, "answer": answer,
-                "parent_id": str(parent) if parent else None,
-            })
-            st.session_state[f"pending_{deck.id}"] = result["id"]
-            st.rerun()
+    deck_id, parent_id = str(deck.id), str(parent) if parent else None
+    form, question_key, answer_key = new_card_keys(deck_id, parent_id)
+    if error := st.session_state.pop(f"{form}_error", None):
+        st.error(error)
+    elif added := st.session_state.pop(f"{form}_added", None):
+        st.caption(f":green[:material/check_circle: Added “{added}”]")
+    with st.form(form, border=False):
+        st.text_area("Child question" if parent else "Question", key=question_key, height=68)
+        st.text_area("Child answer" if parent else "Answer", key=answer_key, height=90)
+        st.form_submit_button("Add Child Card" if parent else "Create root card", type="primary",
+                              on_click=submit_new_card, args=(deck_id, parent_id))
 
 
 def open_card(deck_id, card_id, mode=None):
@@ -102,25 +156,38 @@ def open_from_graph(deck_id):
         open_card(deck_id, card_id, "Answer")
 
 
+def add_child_from_graph(deck_id):
+    card_id = clicked_card(f"graph_{deck_id}", "add_child")
+    if card_id:
+        open_card(deck_id, card_id, "Add child")
+        st.session_state[f"focus_{deck_id}"] = "question"
+
+
 def editor(deck):
     st.title(deck.name)
-    st.caption("Editor · click a card in the graph to open it, answer it, or edit it.")
+    st.caption("Editor · click a card to open it · ＋ under a card adds a child to it.")
     graph_column, card_column = st.columns([3, 2])
     lookup = {str(c.id): c for c in deck.cards}
     ordered = [str(cid) for cid in preorder(deck)]
     key, mode_key = f"selected_{deck.id}", f"mode_{deck.id}"
     st.session_state.setdefault(mode_key, "Edit")
-    pending = st.session_state.pop(f"pending_{deck.id}", None)
-    if pending in ordered:
-        st.session_state[key] = pending
-        st.session_state[mode_key] = "Edit"  # Keep authoring the card just created.
     if st.session_state.get(key) not in ordered:
         st.session_state[key] = ordered[0] if ordered else None
+    recent = st.session_state.pop(f"recent_{deck.id}", None)
+    # After "+", an add, or a rejected add, put the cursor in the child form field to fill next.
+    focus = st.session_state.pop(f"focus_{deck.id}", None)
+    if focus and st.session_state[mode_key] == "Add child":
+        _, question_key, answer_key = new_card_keys(str(deck.id), st.session_state[key])
+        focus = question_key if focus == "question" else answer_key
+    else:
+        focus = None
     with graph_column:
         if deck.cards:
             card_graph(deck, st.session_state[key], key=f"graph_{deck.id}",
-                       on_select=partial(open_from_graph, str(deck.id)))
-            st.caption("Keyboard: Tab to a card and press Enter to open it.")
+                       on_select=partial(open_from_graph, str(deck.id)),
+                       on_add_child=partial(add_child_from_graph, str(deck.id)),
+                       recent=recent, focus=focus)
+            st.caption("Keyboard: Tab to a card, then Enter opens it and + adds a child.")
         else:
             st.info("Start with a root card, then add children to break down the idea.")
         with st.expander("Add root card", expanded=not deck.cards):
@@ -130,11 +197,23 @@ def editor(deck):
             return
         selected = st.selectbox("Select card", ordered, format_func=lambda cid: lookup[cid].question, key=key)
         card = lookup[selected]
-        mode = st.radio("Card view", ["Answer", "Edit"], key=mode_key, horizontal=True, label_visibility="collapsed")
+        mode = st.segmented_control("Card view", list(MODES), format_func=MODES.get, key=mode_key,
+                                    required=True, label_visibility="collapsed", width="stretch")
         if mode == "Answer":
             answer_card(deck, card, lookup)
-        else:
+        elif mode == "Edit":
             edit_card(deck, card, lookup, ordered)
+        else:
+            add_child_card(deck, card)
+
+
+def add_child_card(deck, card):
+    count = len(children(deck, card.id))
+    after = f", after its {count} existing {'child' if count == 1 else 'children'}" if count else ""
+    st.caption(f"New child of **{card.question}**{after}.")
+    create_card(deck, card.id)
+    st.caption("Ctrl+Enter adds the card. The parent stays selected so you can add several in a row; "
+               "use ＋ under the new card to go a level deeper.")
 
 
 def answer_card(deck, card, lookup):
@@ -159,33 +238,30 @@ def answer_card(deck, card, lookup):
             if st.button("Hide answer", key=f"hide_{card.id}"):
                 st.session_state[revealed_key] = None
                 st.rerun()
-    st.caption("Choose Edit above to change this card, add a child, or delete it.")
 
 
 def edit_card(deck, card, lookup, ordered):
-    st.subheader("Edit card")
-    with st.form(f"edit_{card.id}"):
-        question = st.text_area("Full question", value=card.question)
-        answer = st.text_area("Full answer", value=card.answer)
-        # Exclude the whole subtree from potential parents.
-        excluded, stack = set(), [card.id]
-        while stack:
-            current = stack.pop()
-            excluded.add(current)
-            stack.extend(c.id for c in children(deck, current))
+    # Exclude the whole subtree from potential parents.
+    excluded, stack = set(), [card.id]
+    while stack:
+        current = stack.pop()
+        excluded.add(current)
+        stack.extend(c.id for c in children(deck, current))
+    with st.form(f"edit_{card.id}", border=False):
+        question = st.text_area("Full question", value=card.question, height=68)
+        answer = st.text_area("Full answer", value=card.answer, height=90)
         parents = [None] + [cid for cid in ordered if lookup[cid].id not in excluded]
         parent_value = str(card.parent_id) if card.parent_id else None
-        parent = st.selectbox("Parent", parents, index=parents.index(parent_value), format_func=lambda cid: "Root (no parent)" if cid is None else lookup[cid].question)
-        order = st.number_input("Sibling position (zero-based)", min_value=0, value=card.order, step=1)
-        st.caption("When changing parent, choose a position within the new sibling group.")
+        parent_column, order_column = st.columns([3, 1])
+        parent = parent_column.selectbox("Parent", parents, index=parents.index(parent_value), format_func=lambda cid: "Root (no parent)" if cid is None else lookup[cid].question)
+        order = order_column.number_input("Position", min_value=0, value=card.order, step=1,
+                                          help="Zero-based position among the parent's children. When changing parent, choose a position within the new sibling group.")
         if st.form_submit_button("Save changes", type="primary"):
             api("PATCH", f"/decks/{deck.id}/cards/{card.id}", json={"question": question, "answer": answer, "parent_id": parent, "order": order})
             st.rerun()
-    with st.expander("Add child", expanded=True):
-        create_card(deck, card.id)
-    with st.expander("Delete card"):
+    with st.popover("Delete card", icon=":material/delete:"):
         confirm = st.checkbox(f"Delete this card and its descendants ({len(excluded)} cards)", key=f"delete_confirm_{card.id}")
-        if st.button("Delete card and descendants", disabled=not confirm):
+        if st.button("Delete card and descendants", disabled=not confirm, type="primary"):
             api("DELETE", f"/decks/{deck.id}/cards/{card.id}")
             st.rerun()
 

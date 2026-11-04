@@ -3,6 +3,7 @@
 const SVG = "http://www.w3.org/2000/svg";
 const MIN_SCALE = 0.85; // Below this, scroll instead of shrinking text further.
 const ARROW = 7;
+const HANDLE_RADIUS = 10;
 
 function svg(name, attrs, parent) {
   const node = document.createElementNS(SVG, name);
@@ -45,6 +46,38 @@ function drawNode(group, node, data) {
   return g;
 }
 
+// "+" handle under a card. It is a sibling of the card (not nested inside it)
+// so the card stays a single button; keyboard users press "+" on a card instead.
+function drawAddHandle(group, node, data) {
+  const { node_width: w, node_height: h } = data;
+  const g = svg("g", {
+    class: "dfc-add",
+    transform: `translate(${node.x + w / 2},${node.y + h + HANDLE_RADIUS + 3})`,
+    role: "button",
+    tabindex: "-1",
+    "aria-label": `Add a child card under: ${node.title}`,
+    "data-id": node.id,
+  }, group);
+  svg("title", {}, g).textContent = "Add a child card";
+  svg("circle", { class: "dfc-add-hit", r: HANDLE_RADIUS + 4 }, g);
+  svg("circle", { class: "dfc-add-disc", r: HANDLE_RADIUS }, g);
+  const arm = HANDLE_RADIUS / 2;
+  svg("path", { class: "dfc-add-plus", d: `M${-arm},0 H${arm} M0,${-arm} V${arm}` }, g);
+  return g;
+}
+
+// Focus the text area of a keyed Streamlit widget once it has been rendered.
+// Keys change after every add, so a stale field from the previous run never matches.
+function focusField(widgetKey, attempts = 40) {
+  const field = document.querySelector(`.st-key-${CSS.escape(widgetKey)} textarea`);
+  if (field) {
+    // The page may still be re-laying out after the rerun: don't let focus jump it.
+    field.focus({ preventScroll: true });
+    const box = field.getBoundingClientRect();
+    if (box.top < 0 || box.bottom > window.innerHeight) field.scrollIntoView({ block: "nearest" });
+  } else if (attempts > 0) setTimeout(() => focusField(widgetKey, attempts - 1), 50);
+}
+
 export default function ({ data, parentElement, setTriggerValue }) {
   const root = parentElement.querySelector(".dfc-graph");
   if (!root || !data || !data.nodes) return;
@@ -59,24 +92,37 @@ export default function ({ data, parentElement, setTriggerValue }) {
   const canvas = svg("svg", { viewBox: `0 0 ${data.width} ${data.height}`, class: "dfc-canvas" });
   drawEdges(svg("g", {}, canvas), data, byId);
   const nodeLayer = svg("g", {}, canvas);
-  const elements = new Map(data.nodes.map((node) => [node.id, drawNode(nodeLayer, node, data)]));
+  const elements = new Map();
+  for (const node of data.nodes) {
+    const element = drawNode(nodeLayer, node, data);
+    if (node.id === data.recent) element.classList.add("recent");
+    elements.set(node.id, element);
+    drawAddHandle(nodeLayer, node, data);
+  }
 
-  const select = (element) => {
+  const send = (event, id) => {
+    const chosen = elements.get(id);
     for (const other of elements.values()) {
-      other.classList.toggle("selected", other === element);
-      other.setAttribute("aria-pressed", String(other === element));
+      other.classList.toggle("selected", other === chosen);
+      other.setAttribute("aria-pressed", String(other === chosen));
     }
-    setTriggerValue("select", element.getAttribute("data-id"));
+    setTriggerValue(event, id);
   };
   canvas.addEventListener("click", (event) => {
+    const handle = event.target.closest(".dfc-add");
     const element = event.target.closest(".dfc-node");
-    if (element) select(element);
+    if (handle) send("add_child", handle.getAttribute("data-id"));
+    else if (element) send("select", element.getAttribute("data-id"));
   });
   canvas.addEventListener("keydown", (event) => {
     const element = event.target.closest(".dfc-node");
-    if (element && (event.key === "Enter" || event.key === " ")) {
+    if (!element) return;
+    if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      select(element);
+      send("select", element.getAttribute("data-id"));
+    } else if (event.key === "+") {
+      event.preventDefault();
+      send("add_child", element.getAttribute("data-id"));
     }
   });
 
@@ -92,20 +138,24 @@ export default function ({ data, parentElement, setTriggerValue }) {
   root.scrollLeft = scrollLeft;
   root.scrollTop = scrollTop;
 
-  // Bring a newly selected card (e.g. chosen from the dropdown) into view.
-  const selected = byId.get(data.selected);
-  if (selected && data.selected !== previousSelection) {
+  // Bring a newly selected card (e.g. chosen from the dropdown) or a newly
+  // created card into view.
+  const reveal = (node) => {
     const { node_width: w, node_height: h } = data;
-    const left = selected.x * scale, top = selected.y * scale;
+    const left = node.x * scale, top = node.y * scale;
     if (left < root.scrollLeft || left + w * scale > root.scrollLeft + root.clientWidth) {
       root.scrollLeft = left + (w * scale) / 2 - root.clientWidth / 2;
     }
-    if (top < root.scrollTop || top + h * scale > root.scrollTop + root.clientHeight) {
+    if (top < root.scrollTop || top + (h + 2 * HANDLE_RADIUS) * scale > root.scrollTop + root.clientHeight) {
       root.scrollTop = top + (h * scale) / 2 - root.clientHeight / 2;
     }
-  }
+  };
+  const selected = byId.get(data.selected);
+  if (selected && data.selected !== previousSelection) reveal(selected);
+  if (byId.has(data.recent)) reveal(byId.get(data.recent));
   root.dataset.selected = data.selected || "";
-  if (focusedId && elements.has(focusedId)) elements.get(focusedId).focus({ preventScroll: true });
+  if (data.focus) focusField(data.focus);
+  else if (focusedId && elements.has(focusedId)) elements.get(focusedId).focus({ preventScroll: true });
 
   const observer = new ResizeObserver(fit);
   observer.observe(root);

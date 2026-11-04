@@ -17,9 +17,15 @@ Open **http://127.0.0.1:8501**. The launcher starts FastAPI on port 8000 and Str
 
 The launcher automatically uses the repository's `.venv` when present, even if `python run.py` is invoked from another Python installation. It checks dependencies before starting either service and prints the installation command if they are missing.
 
-Create a deck in the library. In its editor, add a root card, then use Add Child Card to build deeper branches. Saves persist immediately through FastAPI. Deleting a deck or subtree requires confirmation.
+Create a deck in the library. In its editor, add a root card; you go straight on to adding its children. Saves persist immediately through FastAPI. Deleting a deck or subtree requires confirmation.
 
-The editor's graph is interactive. Click a card (or Tab to it and press Enter) to open it in **Answer** view: its question, its path from the root, an optional box for your own answer, and Reveal answer to compare. Switch to **Edit** view to change the question, answer, parent, or zero-based sibling position, add a child, or delete the card. Clicking a card always opens it in Answer view and starts a fresh attempt. The Select card dropdown offers the same selection and keeps the current view. Newly created cards open in Edit view. Large graphs scroll inside their frame, and the selected card is scrolled into view. The graph is drawn by a small built-in component (`frontend/graph.py`, `graph.js`, `graph.css`), so no Graphviz installation is needed.
+The editor's graph is interactive:
+
+- **Click a card** (or Tab to it and press Enter) to open it in the **Answer** view: its question, its path from the root, an optional box for your own answer, and Reveal answer to compare. Clicking always starts a fresh attempt.
+- **Click ＋ under a card** (or press + on a focused card) to open the **Add child** view for that card with the cursor in the question box. Type the question, Tab, type the answer, and press Ctrl+Enter. The parent stays selected, so you can add several children in a row. The new card is highlighted in the graph; use its own ＋ to go a level deeper. If the question or answer is missing, or the save fails, your text is kept. The ＋ shows on the selected card and on hover (always on touch screens).
+- The **Edit** view changes the question, answer, parent, or zero-based position, and holds Delete behind a confirmation popover.
+
+The Select card dropdown offers the same selection and keeps the current view. Each view fits on one screen (checked at 1366×768) without scrolling. Large graphs scroll inside their frame, and the selected card is scrolled into view. The graph is drawn by a small built-in component (`frontend/graph.py`, `graph.js`, `graph.css`), so no Graphviz installation is needed.
 
 Study shows one question at a time. Flip reveals its answer and child links. Continue chooses the earliest unvisited card in the deck's DFS order, including branches skipped by a manual jump. Cards count as visited when displayed. Back and breadcrumb links deliberately allow reviewing visited cards; Continue never automatically repeats them. After the last card, Continue opens the completion screen. Restart starts over. Study progress belongs only to the active browser session; editing a deck resets its session.
 

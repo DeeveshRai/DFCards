@@ -58,3 +58,57 @@
   stroke: var(--st-primary-color, #2563eb);
   stroke-width: 2.4;
 }
+
+/* A just-created card pulses briefly so it is easy to spot. */
+.dfc-node.recent rect {
+  animation: dfc-pulse 1.6s ease-out 2;
+}
+
+@keyframes dfc-pulse {
+  0% { stroke: var(--st-green-color, #16a34a); stroke-width: 4; }
+  100% { stroke-width: 1.2; }
+}
+
+/* "+" handle: shown for the hovered, focused or selected card (always on touch screens). */
+.dfc-add {
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+
+.dfc-add-hit {
+  fill: transparent;
+}
+
+.dfc-add-disc {
+  fill: var(--st-background-color, #ffffff);
+  stroke: var(--st-primary-color, #2563eb);
+  stroke-width: 1.5;
+}
+
+.dfc-add-plus {
+  stroke: var(--st-primary-color, #2563eb);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.dfc-node:hover + .dfc-add,
+.dfc-node:focus-visible + .dfc-add,
+.dfc-node.selected + .dfc-add,
+.dfc-add:hover {
+  opacity: 1;
+}
+
+.dfc-add:hover .dfc-add-disc {
+  fill: var(--st-primary-color, #2563eb);
+}
+
+.dfc-add:hover .dfc-add-plus {
+  stroke: var(--st-background-color, #ffffff);
+}
+
+@media (hover: none) {
+  .dfc-add {
+    opacity: 0.9;
+  }
+}

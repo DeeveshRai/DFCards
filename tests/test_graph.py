@@ -1,6 +1,6 @@
 from backend.models import Card, Deck
 from backend.traversal import preorder
-from frontend.graph import MAX_LINES, NODE_HEIGHT, NODE_WIDTH, SIBLING_GAP, layout, wrap_label
+from frontend.graph import HANDLE_SPACE, MAX_LINES, NODE_HEIGHT, NODE_WIDTH, SIBLING_GAP, layout, wrap_label
 
 
 def build(spec):
@@ -28,6 +28,7 @@ def test_nodes_follow_tree_shape():
     assert [n["id"] for n in result["nodes"]] == [str(i) for i in preorder(deck)]
     assert sorted(result["edges"]) == sorted([str(c.parent_id), str(c.id)] for c in deck.cards if c.parent_id)
     assert [n["title"] for n in result["nodes"] if n["selected"]] == ["C"] and result["selected"] == str(cards["C"].id)
+    assert result["recent"] is None and layout(deck, recent=str(cards["F"].id))["recent"] == str(cards["F"].id)
     # Depth determines the row; sibling order determines left-to-right position.
     assert nodes["A"]["y"] == nodes["G"]["y"] < nodes["B"]["y"] == nodes["C"]["y"] < nodes["D"]["y"] == nodes["F"]["y"]
     assert nodes["B"]["x"] < nodes["C"]["x"] and nodes["D"]["x"] < nodes["E"]["x"] and nodes["A"]["x"] < nodes["G"]["x"]
@@ -45,7 +46,8 @@ def test_no_overlap_and_everything_fits_the_canvas():
     for node in result["nodes"]:
         rows.setdefault(node["y"], []).append(node["x"])
         assert node["x"] >= 0 and node["x"] + NODE_WIDTH <= result["width"]
-        assert node["y"] >= 0 and node["y"] + NODE_HEIGHT <= result["height"]
+        # Leave room for the "+" add-child handle under even the deepest cards.
+        assert node["y"] >= 0 and node["y"] + NODE_HEIGHT + HANDLE_SPACE <= result["height"]
     for xs in rows.values():
         xs.sort()
         assert all(right - left >= NODE_WIDTH + SIBLING_GAP for left, right in zip(xs, xs[1:]))

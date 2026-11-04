@@ -19,6 +19,7 @@ NODE_HEIGHT = MAX_LINES * LINE_HEIGHT + 20
 SIBLING_GAP = 20
 LEVEL_GAP = 56
 MARGIN = 16
+HANDLE_SPACE = 24  # Room under the deepest row for the "add child" handle.
 
 _ASSETS = Path(__file__).resolve().parent
 _component = st.components.v2.component(
@@ -59,8 +60,12 @@ def _place(subtrees):
     return [s - middle for s in shifts], [(l - middle, r - middle) for l, r in merged]
 
 
-def layout(deck: Deck, selected=None):
-    """Position every card in a top-down tree and return data for graph.js."""
+def layout(deck: Deck, selected=None, recent=None):
+    """Position every card in a top-down tree and return data for graph.js.
+
+    ``recent`` marks a just-created card so the graph can highlight it and
+    scroll it into view.
+    """
     kids = {card.id: [] for card in deck.cards}
     roots = []
     for card in sorted(deck.cards, key=lambda c: c.order):
@@ -113,23 +118,28 @@ def layout(deck: Deck, selected=None):
         "nodes": nodes,
         "edges": edges,
         "width": round(max(r for _, r in forest) - left + 2 * MARGIN, 1),
-        "height": MARGIN * 2 + (max(depth.values()) + 1) * NODE_HEIGHT + max(depth.values()) * LEVEL_GAP,
+        "height": MARGIN * 2 + HANDLE_SPACE + (max(depth.values()) + 1) * NODE_HEIGHT + max(depth.values()) * LEVEL_GAP,
         "node_width": NODE_WIDTH,
         "node_height": NODE_HEIGHT,
         "line_height": LINE_HEIGHT,
         "selected": selected,
+        "recent": recent,
     }
 
 
-def card_graph(deck: Deck, selected, key, on_select):
-    """Draw the deck graph; ``on_select`` runs before the rerun that follows a node click.
+def card_graph(deck: Deck, selected, key, on_select, on_add_child, recent=None, focus=None):
+    """Draw the deck graph.
 
-    Read the clicked card ID inside the callback with ``clicked_card(key)``.
+    ``on_select`` runs when a card is clicked and ``on_add_child`` when its "+"
+    handle is clicked, both before the rerun that follows. Read the card ID in
+    the callback with ``clicked_card(key, event)``. ``focus`` is the widget key of
+    a Streamlit text area to focus once it is rendered (e.g. the new child form).
     """
-    return _component(key=key, data=layout(deck, selected), on_select_change=on_select)
+    data = {**layout(deck, selected, recent), "focus": focus}
+    return _component(key=key, data=data, on_select_change=on_select, on_add_child_change=on_add_child)
 
 
-def clicked_card(key):
-    """Return the card ID sent by the most recent node click, if any."""
+def clicked_card(key, event="select"):
+    """Return the card ID sent by the most recent ``event`` ("select" or "add_child")."""
     state = st.session_state.get(key)
-    return state.get("select") if state else None
+    return state.get(event) if state else None
