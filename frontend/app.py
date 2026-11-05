@@ -1,7 +1,9 @@
 import os
+import re
 import sys
 from functools import partial
 from pathlib import Path
+from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -10,7 +12,7 @@ import streamlit as st
 
 from backend.models import Deck
 from backend.traversal import StudySession, children, preorder
-from frontend.graph import card_graph, clicked_card
+from frontend.graph import card_graph, clicked_card, study_graph
 
 API = os.getenv("DFCARDS_API_URL", "http://127.0.0.1:8000")
 st.set_page_config(page_title="DFCards", page_icon="🌳", layout="wide")
@@ -216,6 +218,46 @@ def add_child_card(deck, card):
                "use ＋ under the new card to go a level deeper.")
 
 
+def answer_box(key, slot, revealed):
+    """Optional "Your answer" box, shared by the editor's Answer view and Study.
+
+    It is editable until the answer is revealed, then shows the typed answer
+    read-only (from ``lock_answer``) so it can be compared honestly with the
+    real one. Nothing is shown after the reveal if nothing was typed.
+    """
+    if not revealed:
+        st.text_area("Your answer", key=key, placeholder="Optional: write your answer, then reveal it to compare.")
+        return
+    locked = st.session_state.get(slot)
+    if locked and locked["key"] == key and locked["text"].strip():
+        # Shown as text, not a disabled box: Streamlit greys disabled text out, which is hard to read.
+        st.caption("Your answer")
+        st.markdown(as_quote(locked["text"]))
+
+
+# Backslash-escape Markdown punctuation (and ":" for Streamlit's :icon: and :color[] syntax).
+MARKDOWN_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|>~<$:&])")
+
+
+def as_quote(text):
+    """Typed text as a Markdown block quote that displays literally, line breaks included."""
+    return "> " + "  \n> ".join(MARKDOWN_SPECIAL.sub(r"\\\1", line) for line in text.strip().splitlines())
+
+
+def lock_answer(key, slot):
+    """Call when the answer is revealed: keep the typed answer to show read-only.
+
+    The text is copied out because Streamlit discards browser values for a
+    disabled widget, so making the box itself read-only would empty it.
+    """
+    st.session_state[slot] = {"key": key, "text": st.session_state.get(key, "")}
+
+
+def show_answer(card):
+    st.caption("Answer")
+    st.write(card.answer)
+
+
 def answer_card(deck, card, lookup):
     revealed_key = f"revealed_{deck.id}"
     ancestors, parent = [], card.parent_id
@@ -226,17 +268,19 @@ def answer_card(deck, card, lookup):
         st.caption(" › ".join(reversed(ancestors)))
     with st.container(border=True):
         st.subheader(card.question)
-        st.text_area("Your answer", key=f"attempt_{card.id}",
-                     placeholder="Optional: write your answer, then reveal it to compare.")
-        if st.session_state.get(revealed_key) != str(card.id):
+        revealed = st.session_state.get(revealed_key) == str(card.id)
+        box, slot = f"attempt_{card.id}", f"locked_attempt_{deck.id}"
+        answer_box(box, slot, revealed)
+        if not revealed:
             if st.button("Reveal answer", type="primary", key=f"reveal_{card.id}"):
+                lock_answer(box, slot)
                 st.session_state[revealed_key] = str(card.id)
                 st.rerun()
         else:
-            st.caption("Answer")
-            st.write(card.answer)
+            show_answer(card)
             if st.button("Hide answer", key=f"hide_{card.id}"):
                 st.session_state[revealed_key] = None
+                st.session_state[box] = st.session_state.get(slot, {}).get("text", "")  # Editable again.
                 st.rerun()
 
 
@@ -266,6 +310,31 @@ def edit_card(deck, card, lookup, ordered):
             st.rerun()
 
 
+# Study status: colour plus a distinct icon, so it never relies on colour alone.
+STATUS_ICONS = {"unvisited": ":material/radio_button_unchecked:", "in_progress": ":material/timelapse:",
+                "complete": ":material/check_circle:"}
+STATUS_HELP = {"unvisited": "Not visited yet.",
+               "in_progress": "In progress: its answer, or a card below it, is not revealed yet.",
+               "complete": "Completed: its answer and every card below it have been revealed."}
+# Child buttons are keyed "child_<status>_<id>"; Streamlit adds the key as a CSS class.
+STATUS_STYLES = """<style>
+[class*="st-key-child_in_progress_"] button { border-color: #f08c00; background-color: rgba(240, 140, 0, 0.15); }
+[class*="st-key-child_in_progress_"] button [data-testid="stIconMaterial"] { color: #f08c00; }
+[class*="st-key-child_complete_"] button { border-color: #2e9e4f; background-color: rgba(46, 158, 79, 0.15); }
+[class*="st-key-child_complete_"] button [data-testid="stIconMaterial"] { color: #2e9e4f; }
+</style>"""
+STATUS_LEGEND = (":orange[:material/timelapse: In progress]: seen, but its answer or a card below it is not revealed yet · "
+                 ":green[:material/check_circle: Completed]: its answer and everything below it revealed")
+
+
+def open_from_tree(deck_id):
+    # Callback: revisit a revealed card clicked in the study tree.
+    session = st.session_state.get("study")
+    card_id = clicked_card(f"study_graph_{deck_id}")
+    if session and card_id and UUID(card_id) in session.flipped:
+        session.navigate(UUID(card_id))
+
+
 def study(deck):
     st.title(deck.name)
     fingerprint = deck.model_dump_json()
@@ -273,16 +342,48 @@ def study(deck):
         st.session_state.study = StudySession(deck)
         st.session_state.study_fingerprint = fingerprint
     session = st.session_state.study
-    total = len(session.sequence)
-    if not total:
+    if not session.sequence:
         st.info("This deck has no cards. Add a root card in the editor.")
         return
+    tree_column, card_column = st.columns([3, 2])
+    statuses = {str(card_id): status for card_id, status in session.statuses().items()}
+    with tree_column:
+        study_tree(deck, session, statuses)
+    with card_column:
+        study_card(deck, session, statuses)
+
+
+def study_tree(deck, session, statuses):
+    """The tree grows as answers are revealed: only flipped cards are added to it."""
+    revealed = {str(card_id) for card_id in session.flipped}
+    recent = st.session_state.pop("study_recent", None)
+    if not revealed:
+        st.info("Your tree grows here. Flip a card to reveal its answer and add it to the tree.")
+        return
+    current = str(session.current) if session.current else None
+    study_graph(deck, revealed, current, key=f"study_graph_{deck.id}",
+                on_select=partial(open_from_tree, str(deck.id)), recent=recent, statuses=statuses)
+    has_placeholder = any(c.parent_id and str(c.parent_id) not in revealed for c in deck.cards if str(c.id) in revealed)
+    st.caption(f"Your tree · {len(revealed)} of {len(session.sequence)} cards revealed. Click a revealed card to revisit it"
+               + ("; ? marks a card you have not revealed yet." if has_placeholder else "."))
+    st.caption(STATUS_LEGEND + " · outlined: the card you are on.")
+
+
+def study_card(deck, session, statuses):
+    total = len(session.sequence)
     st.progress(len(session.visited) / total, text=f"{len(session.visited)} / {total} cards visited")
     if st.button("Restart session"):
         session.restart()
         st.rerun()
     if session.current is None:
         st.success("Session complete! You have visited every card.")
+        if skipped := session.skipped():
+            count = f"{len(skipped)} card{'s' if len(skipped) != 1 else ''}"
+            st.info(f"{count} still {'has' if len(skipped) == 1 else 'have'} an unrevealed answer "
+                    "(orange in your tree).")
+            if st.button("Review unrevealed cards", type="primary"):
+                session.navigate(skipped[0])
+                st.rerun()
         if st.button("Back to last card", disabled=not session.history):
             session.back()
             st.rerun()
@@ -295,18 +396,25 @@ def study(deck):
     card = next(c for c in deck.cards if c.id == session.current)
     with st.container(border=True):
         st.subheader(card.question)
+        # A new box each time a card is shown (views), so every visit starts empty.
+        box = f"study_attempt_{card.id}_{session.views}"
+        answer_box(box, "locked_study_attempt", session.revealed)
         if not session.revealed:
             if st.button("Flip", type="primary"):
-                session.revealed = True
+                lock_answer(box, "locked_study_attempt")
+                if session.flip():
+                    st.session_state.study_recent = str(session.current)  # Animate it joining the tree.
                 st.rerun()
         else:
-            st.write(card.answer)
+            show_answer(card)
             child_cards = children(deck, card.id)
             if child_cards:
+                st.html(STATUS_STYLES)
                 st.caption("Explore a child question")
                 for child in child_cards:
-                    suffix = " · visited" if child.id in session.visited else ""
-                    if st.button(child.question + suffix, key=f"child_{child.id}"):
+                    status = statuses[str(child.id)]
+                    if st.button(child.question, key=f"child_{status}_{child.id}",
+                                 icon=STATUS_ICONS[status], help=STATUS_HELP[status]):
                         session.navigate(child.id)
                         st.rerun()
     back, forward = st.columns(2)
@@ -316,7 +424,9 @@ def study(deck):
     if forward.button("Continue", type="primary"):
         session.advance()
         st.rerun()
-    st.caption("Continue visits the earliest unvisited card in depth-first order. Back and breadcrumbs revisit cards without resetting progress.")
+    st.caption("Continue goes to the next unvisited card in depth-first order. A card you leave without "
+               "flipping comes back once you have visited the cards below it. Back and breadcrumbs "
+               "revisit cards without resetting progress.")
 
 
 with st.sidebar:

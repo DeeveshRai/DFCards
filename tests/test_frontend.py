@@ -97,8 +97,12 @@ def test_editor_and_study_end_to_end(client):
     button(app, "Flip").click().run()
     button(app, "What is a process?").click().run()
     assert app.subheader[0].value == "What is a process?"
-    button(app, "Continue").click().run()
+    button(app, "Continue").click().run()  # Left without flipping...
     assert app.subheader[0].value == "What is a hardware thread?"
+    button(app, "Flip").click().run()
+    button(app, "Continue").click().run()
+    assert app.subheader[0].value == "What is a process?"  # ...so it comes back.
+    button(app, "Flip").click().run()
     button(app, "Continue").click().run()
     assert app.success[0].value.startswith("Session complete")
     button(app, "Restart session").click().run()
@@ -127,7 +131,8 @@ def test_clicking_graph_node_opens_question_to_answer_and_edit(client):
     app.text_area(key=f"attempt_{child}").set_value("A program in execution")
     button(app, "Reveal answer").click().run()
     assert "A running program." in [m.value for m in app.markdown]
-    assert app.text_area(key=f"attempt_{child}").value == "A program in execution"
+    # The typed answer stays on screen, read-only, above the real answer for comparison.
+    assert shown_attempt(app) == "> A program in execution" and answer_boxes(app) == []
 
     # Re-opening the card starts a fresh attempt with the answer hidden.
     click_node(app, child)
@@ -251,3 +256,193 @@ def test_compact_edit_view_saves_and_deletes(client):
     assert not app.exception
     assert [c["id"] for c in client.get(f"/decks/{deck}").json()["cards"]] == [root]
     assert graph_selection(app) == root
+
+
+def tree_titles(app):
+    if not any(e.type == "bidi_component" for e in app.main):
+        return None
+    return [("?" if n["ghost"] else "") + n["title"] for n in graph_data(app)["nodes"]]
+
+
+def test_study_tree_grows_as_answers_are_revealed(client):
+    deck = client.post("/decks", json={"name": "Study deck"}).json()["id"]
+    add = lambda question, parent=None: client.post(
+        f"/decks/{deck}/cards", json={"question": question, "answer": "An answer.", "parent_id": parent}).json()["id"]
+    root = add("Root?")
+    child = add("Child?", root)
+    grandchild = add("Grandchild?", child)
+    sibling = add("Sibling?", root)
+    app = AppTest.from_file(APP, default_timeout=20).run()
+    button(app, "Study").click().run()
+    assert tree_titles(app) is None and app.info[0].value.startswith("Your tree grows here")
+
+    button(app, "Flip").click().run()
+    assert tree_titles(app) == ["Root?"]
+    assert graph_data(app)["recent"] == root and graph_selection(app) == root
+    assert graph_data(app)["editable"] is False
+
+    button(app, "Continue").click().run()  # Visiting without revealing adds nothing.
+    assert app.subheader[0].value == "Child?" and tree_titles(app) == ["Root?"]
+    assert graph_selection(app) is None
+    button(app, "Continue").click().run()
+    button(app, "Flip").click().run()
+    assert tree_titles(app) == ["Root?", "?Not revealed yet", "Grandchild?"]
+    assert graph_selection(app) == grandchild
+
+    # Clicking a revealed card revisits it; unrevealed cards cannot be opened from the tree.
+    click_node(app, root)
+    assert not app.exception and app.subheader[0].value == "Root?"
+    click_node(app, sibling)
+    click_node(app, child)
+    assert app.subheader[0].value == "Root?"
+
+    button(app, "Restart session").click().run()
+    assert tree_titles(app) is None
+
+
+def child_buttons(app):
+    """(question, status, icon) for each "Explore a child question" button."""
+    # Keys are "child_<status>_<card id>"; card IDs contain no underscores.
+    return [(b.label, b.key.removeprefix("child_").rsplit("_", 1)[0], b.icon)
+            for b in app.button if b.key and b.key.startswith("child_")]
+
+
+def test_study_colours_cards_by_progress(client):
+    deck = client.post("/decks", json={"name": "Status deck"}).json()["id"]
+    add = lambda question, parent=None: client.post(
+        f"/decks/{deck}/cards", json={"question": question, "answer": "An answer.", "parent_id": parent}).json()["id"]
+    root = add("Root?")
+    branch = add("Branch?", root)
+    leaf = add("Leaf under branch?", branch)
+    other = add("Other leaf?", root)
+    app = AppTest.from_file(APP, default_timeout=20).run()
+    button(app, "Study").click().run()
+    button(app, "Flip").click().run()
+    assert child_buttons(app) == [("Branch?", "unvisited", ":material/radio_button_unchecked:"),
+                                  ("Other leaf?", "unvisited", ":material/radio_button_unchecked:")]
+    assert not any("visited" in b.label for b in app.button)  # The old " · visited" suffix is gone.
+    statuses = lambda: {n["title"]: n["status"] for n in graph_data(app)["nodes"]}
+    assert statuses() == {"Root?": "in_progress"} and graph_data(app)["nodes"][0]["current"]
+
+    button(app, "Other leaf?").click().run()  # A leaf is complete as soon as it is visited.
+    button(app, "Flip").click().run()
+    assert statuses() == {"Root?": "in_progress", "Other leaf?": "complete"}
+    button(app, "Back").click().run()
+    button(app, "Flip").click().run()
+    assert child_buttons(app) == [("Branch?", "unvisited", ":material/radio_button_unchecked:"),
+                                  ("Other leaf?", "complete", ":material/check_circle:")]
+
+    button(app, "Branch?").click().run()  # Visited, but its own child is not: in progress.
+    button(app, "Back").click().run()
+    button(app, "Flip").click().run()
+    assert child_buttons(app)[0] == ("Branch?", "in_progress", ":material/timelapse:")
+    assert next(b for b in app.button if b.label == "Branch?").help.startswith("In progress: its answer, or a card below it")
+    assert statuses()["Root?"] == "in_progress"
+
+    button(app, "Branch?").click().run()
+    button(app, "Flip").click().run()
+    button(app, "Leaf under branch?").click().run()
+    button(app, "Flip").click().run()
+    assert statuses() == {"Root?": "complete", "Branch?": "complete", "Other leaf?": "complete",
+                          "Leaf under branch?": "complete"}
+    assert not app.exception
+
+
+def test_unflipped_card_stays_in_progress_and_comes_back(client):
+    deck = client.post("/decks", json={"name": "Skip deck"}).json()["id"]
+    add = lambda question, parent=None: client.post(
+        f"/decks/{deck}/cards", json={"question": question, "answer": "An answer.", "parent_id": parent}).json()["id"]
+    root = add("Root?")
+    middle = add("Middle?", root)
+    add("Leaf?", middle)
+    add("Sibling?", root)
+    app = AppTest.from_file(APP, default_timeout=20).run()
+    button(app, "Study").click().run()
+    button(app, "Flip").click().run()
+    button(app, "Continue").click().run()
+    assert app.subheader[0].value == "Middle?"
+    button(app, "Continue").click().run()  # Leave "Middle?" without flipping it.
+    assert app.subheader[0].value == "Leaf?"
+    button(app, "Flip").click().run()
+    nodes = {("?" if n["ghost"] else "") + n["title"]: n["status"] for n in graph_data(app)["nodes"]}
+    # The placeholder is in progress (orange), not completed (green with a tick).
+    assert nodes == {"Root?": "in_progress", "?Not revealed yet": "in_progress", "Leaf?": "complete"}
+
+    button(app, "Continue").click().run()
+    assert app.subheader[0].value == "Middle?"  # Back for the card left unflipped.
+    button(app, "Continue").click().run()  # Skipped again: the session moves on.
+    assert app.subheader[0].value == "Sibling?"
+    button(app, "Flip").click().run()
+    button(app, "Continue").click().run()
+    assert app.success[0].value.startswith("Session complete")
+    assert app.info[0].value.startswith("1 card still has an unrevealed answer")
+
+    button(app, "Review unrevealed cards").click().run()
+    assert app.subheader[0].value == "Middle?"
+    button(app, "Flip").click().run()
+    assert {n["title"]: n["status"] for n in graph_data(app)["nodes"]}["Root?"] == "complete"
+    button(app, "Continue").click().run()
+    assert app.success[0].value.startswith("Session complete") and not app.info
+
+
+def answer_boxes(app):
+    """Values of the editable "Your answer" boxes on screen."""
+    return [t.value for t in app.text_area if t.label == "Your answer"]
+
+
+def shown_attempt(app):
+    """The typed answer shown read-only after the reveal (a Markdown quote), if any."""
+    return next((m.value for m in app.markdown if m.value.startswith("> ")), None)
+
+
+def test_study_answer_box_compares_and_starts_fresh_on_every_card(client):
+    deck = client.post("/decks", json={"name": "Answer deck"}).json()["id"]
+    add = lambda question, answer, parent=None: client.post(
+        f"/decks/{deck}/cards", json={"question": question, "answer": answer, "parent_id": parent}).json()["id"]
+    root = add("Root?", "The root answer.")
+    child = add("Child?", "The child answer.", root)
+    add("Sibling?", "The sibling answer.", root)
+    app = AppTest.from_file(APP, default_timeout=20).run()
+    button(app, "Study").click().run()
+    assert answer_boxes(app) == [""]
+
+    field(app, "Your answer").set_value("My guess: **not** bold :red[x]\nSecond line")
+    button(app, "Flip").click().run()
+    # The typed answer is kept, read-only and shown exactly as typed, next to the real answer.
+    assert answer_boxes(app) == []
+    assert shown_attempt(app) == "> My guess\\: \\*\\*not\\*\\* bold \\:red\\[x\\]  \n> Second line"
+    assert "The root answer." in [m.value for m in app.markdown]
+
+    for move in (lambda: button(app, "Child?").click().run(),    # Child button.
+                 lambda: button(app, "Back").click().run(),       # Back.
+                 lambda: click_node(app, root),                   # Tree (the same card, asked again).
+                 lambda: button(app, "Continue").click().run()):  # Continue: back to "Child?", left unflipped.
+        move()
+        assert answer_boxes(app) == [""] and shown_attempt(app) is None, "every card starts with an empty box"
+        field(app, "Your answer").set_value("Something typed")  # Left behind by the next move.
+
+    assert app.subheader[0].value == "Child?"
+
+    # Flipping with nothing typed shows only the real answer.
+    field(app, "Your answer").set_value("")
+    button(app, "Flip").click().run()
+    assert answer_boxes(app) == [] and shown_attempt(app) is None
+    assert "The child answer." in [m.value for m in app.markdown]
+
+    # Restart starts fresh too.
+    button(app, "Continue").click().run()
+    assert app.subheader[0].value == "Sibling?"
+    field(app, "Your answer").set_value("Half an idea")
+    button(app, "Restart session").click().run()
+    assert app.subheader[0].value == "Root?" and answer_boxes(app) == [""]
+    assert not app.exception
+
+
+def test_editor_hide_answer_makes_the_typed_answer_editable_again(client):
+    app, deck, root = open_graph_deck(client)
+    click_node(app, root)
+    field(app, "Your answer").set_value("First try")
+    button(app, "Reveal answer").click().run()
+    assert shown_attempt(app) == "> First try" and answer_boxes(app) == []
+    button(app, "Hide answer").click().run()
+    assert answer_boxes(app) == ["First try"] and shown_attempt(app) is None

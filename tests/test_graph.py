@@ -1,6 +1,6 @@
 from backend.models import Card, Deck
 from backend.traversal import preorder
-from frontend.graph import HANDLE_SPACE, MAX_LINES, NODE_HEIGHT, NODE_WIDTH, SIBLING_GAP, layout, wrap_label
+from frontend.graph import HANDLE_SPACE, MARGIN, MAX_LINES, NODE_HEIGHT, NODE_WIDTH, SIBLING_GAP, layout, revealed_layout, wrap_label
 
 
 def build(spec):
@@ -79,3 +79,53 @@ def test_labels_wrap_and_truncate_but_keep_full_text_for_tooltips():
     assert all(len(line) <= 23 for line in wrap_label("x" * 200))
     deck, _ = build([(question.strip(), None, 0)])
     assert layout(deck)["nodes"][0]["title"] == question.strip()
+
+
+def test_revealed_layout_pops_cards_into_their_final_positions():
+    deck, cards = tree()
+    ids = {name: str(card.id) for name, card in cards.items()}
+    full = by_question(layout(deck))
+    assert revealed_layout(deck, set())["nodes"] == []
+
+    early = revealed_layout(deck, {ids["A"], ids["B"]}, current=ids["B"], recent=ids["B"])
+    assert [n["title"] for n in early["nodes"]] == ["A", "B"]
+    assert early["edges"] == [[ids["A"], ids["B"]]] and early["recent"] == ids["B"]
+    # The card being studied is marked "current" (an outline), not "selected" (a fill that would hide its status).
+    assert [n["title"] for n in early["nodes"] if n["current"]] == ["B"] and not any(n["selected"] for n in early["nodes"])
+    assert early["selected"] == ids["B"] and not early["editable"]
+
+    later = revealed_layout(deck, {ids[n] for n in "ABDCFG"})
+    for result in (early, later):
+        nodes = by_question(result)
+        assert min(n["x"] for n in result["nodes"]) == MARGIN  # Cropped to what is visible...
+        for name, node in nodes.items():
+            # ...but every card keeps its final position relative to the others.
+            assert node["x"] - nodes["A"]["x"] == full[name]["x"] - full["A"]["x"]
+            assert node["y"] == full[name]["y"]
+            assert node["x"] + NODE_WIDTH <= result["width"] and node["y"] + NODE_HEIGHT <= result["height"]
+    assert "E" not in by_question(later) and len(later["edges"]) == 4
+
+
+def test_unrevealed_ancestors_become_placeholders():
+    deck, cards = tree()
+    ids = {name: str(card.id) for name, card in cards.items()}
+    result = revealed_layout(deck, {ids["D"]}, current=ids["D"])
+    nodes = {n["id"]: n for n in result["nodes"]}
+    assert set(nodes) == {ids["A"], ids["B"], ids["D"]}
+    for ghost in (ids["A"], ids["B"]):
+        assert nodes[ghost]["ghost"] and nodes[ghost]["lines"] == ["?"] and nodes[ghost]["title"] == "Not revealed yet"
+        assert not nodes[ghost]["selected"]
+    assert not nodes[ids["D"]]["ghost"] and nodes[ids["D"]]["title"] == "D"
+    assert sorted(result["edges"]) == sorted([[ids["A"], ids["B"]], [ids["B"], ids["D"]]])
+    # A recent card that is not in the tree is not reported.
+    assert revealed_layout(deck, {ids["D"]}, recent=ids["E"])["recent"] is None
+
+
+def test_revealed_layout_carries_study_status():
+    deck, cards = tree()
+    ids = {name: str(card.id) for name, card in cards.items()}
+    statuses = {ids["A"]: "in_progress", ids["B"]: "complete", ids["D"]: "complete"}
+    nodes = {n["id"]: n for n in revealed_layout(deck, {ids["A"], ids["D"]}, statuses=statuses)["nodes"]}
+    assert nodes[ids["A"]]["status"] == "in_progress" and nodes[ids["D"]]["status"] == "complete"
+    assert nodes[ids["B"]]["ghost"] and nodes[ids["B"]]["status"] == "complete"  # Placeholders show status too.
+    assert revealed_layout(deck, {ids["C"]})["nodes"][1]["status"] == "unvisited"  # Default without statuses.

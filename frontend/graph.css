@@ -29,7 +29,7 @@
   outline: none;
 }
 
-.dfc-node rect {
+.dfc-node .dfc-card {
   fill: var(--st-secondary-background-color, #f1f5f9);
   stroke: var(--st-border-color, #cbd5e1);
   stroke-width: 1.2;
@@ -43,16 +43,16 @@
   user-select: none;
 }
 
-.dfc-node:hover rect {
+.dfc-node:hover .dfc-card {
   stroke: var(--st-primary-color, #2563eb);
 }
 
-.dfc-node:focus-visible rect {
+.dfc-node:focus-visible .dfc-card {
   stroke: var(--st-primary-color, #2563eb);
   stroke-width: 3;
 }
 
-.dfc-node.selected rect {
+.dfc-node.selected .dfc-card {
   fill: #bfdbfe;
   fill: color-mix(in srgb, var(--st-primary-color, #2563eb) 22%, var(--st-background-color, #ffffff));
   stroke: var(--st-primary-color, #2563eb);
@@ -60,12 +60,12 @@
 }
 
 /* A just-created card pulses briefly so it is easy to spot. */
-.dfc-node.recent rect {
+.dfc-node.recent .dfc-card {
   animation: dfc-pulse 1.6s ease-out 2;
 }
 
 @keyframes dfc-pulse {
-  0% { stroke: var(--st-green-color, #16a34a); stroke-width: 4; }
+  0% { stroke: var(--st-blue-color, #2563eb); stroke-width: 4; }
   100% { stroke-width: 1.2; }
 }
 
@@ -111,4 +111,98 @@
   .dfc-add {
     opacity: 0.9;
   }
+}
+
+/* Study view: a placeholder for an ancestor that has not been revealed yet. */
+.dfc-node.ghost {
+  cursor: default;
+}
+
+.dfc-node.ghost .dfc-card {
+  fill: transparent;
+  stroke-dasharray: 5 4;
+}
+
+.dfc-node.ghost:hover .dfc-card {
+  stroke: var(--st-border-color, #cbd5e1);
+}
+
+.dfc-node.ghost text {
+  fill: var(--st-gray-color, #94a3b8);
+  font-size: 18px;
+}
+
+/* A card joining the study tree fades in as well as pulsing. */
+.dfc-node.recent {
+  animation: dfc-appear 500ms ease-out;
+}
+
+@keyframes dfc-appear {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Study status. Orange: seen, but not everything in its branch is revealed. Green: the whole branch is revealed. */
+.dfc-ring {
+  fill: none;
+  stroke: none;
+}
+
+.dfc-node.current .dfc-ring {
+  stroke: var(--st-text-color, #31333f);
+  stroke-width: 2;
+}
+
+.dfc-node.status-in_progress .dfc-card {
+  fill: var(--st-orange-background-color, rgba(255, 164, 33, 0.18));
+  stroke: var(--st-orange-color, #e07b00);
+  stroke-width: 1.6;
+}
+
+.dfc-node.status-complete .dfc-card {
+  fill: var(--st-green-background-color, rgba(33, 195, 84, 0.18));
+  stroke: var(--st-green-color, #15803d);
+  stroke-width: 1.6;
+}
+
+.dfc-node.ghost.status-in_progress .dfc-card,
+.dfc-node.ghost.status-complete .dfc-card {
+  fill: transparent;
+}
+
+.dfc-badge circle {
+  fill: var(--st-background-color, #ffffff);
+  stroke-width: 1.5;
+}
+
+.dfc-node.status-in_progress .dfc-badge circle {
+  stroke: var(--st-orange-color, #e07b00);
+}
+
+.dfc-badge-half {
+  fill: var(--st-orange-color, #e07b00);
+}
+
+.dfc-node.status-complete .dfc-badge circle {
+  fill: var(--st-green-color, #15803d);
+  stroke: var(--st-green-color, #15803d);
+}
+
+.dfc-badge-mark {
+  fill: none;
+  stroke: var(--st-background-color, #ffffff);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Keep hover and keyboard focus visible on top of status colours. */
+.dfc-node:not(.ghost):hover .dfc-card {
+  stroke-width: 2.6;
+}
+
+.dfc-node:focus-visible .dfc-ring {
+  stroke: var(--st-primary-color, #2563eb);
+  stroke-width: 2;
+  stroke-dasharray: 4 3;
 }

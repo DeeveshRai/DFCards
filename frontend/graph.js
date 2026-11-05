@@ -4,6 +4,8 @@ const SVG = "http://www.w3.org/2000/svg";
 const MIN_SCALE = 0.85; // Below this, scroll instead of shrinking text further.
 const ARROW = 7;
 const HANDLE_RADIUS = 10;
+const BADGE_RADIUS = 7;
+const STATUS_TEXT = { in_progress: "in progress: its answer or a card below it is not revealed yet", complete: "completed" };
 
 function svg(name, attrs, parent) {
   const node = document.createElementNS(SVG, name);
@@ -28,22 +30,41 @@ function drawEdges(group, data, byId) {
 
 function drawNode(group, node, data) {
   const { node_width: w, node_height: h, line_height: lh } = data;
-  const g = svg("g", {
-    class: "dfc-node" + (node.selected ? " selected" : ""),
-    transform: `translate(${node.x},${node.y})`,
-    tabindex: "0",
-    role: "button",
-    "aria-label": `Open card: ${node.title}`,
-    "aria-pressed": String(node.selected),
-    "data-id": node.id,
-  }, group);
-  svg("title", {}, g).textContent = node.title;
-  svg("rect", { width: w, height: h, rx: 8, ry: 8 }, g);
+  // Ghosts are placeholders for cards not revealed yet: visible, but not interactive.
+  // Study status (if any) is shown by colour and by a badge, so it never relies on colour alone.
+  const status = STATUS_TEXT[node.status] ? ` (${STATUS_TEXT[node.status]})` : "";
+  const classes = ["dfc-node", node.ghost && "ghost", node.selected && "selected", node.current && "current",
+                   node.status && `status-${node.status}`].filter(Boolean).join(" ");
+  const attrs = node.ghost
+    ? { class: classes, role: "img", "aria-label": `Card not revealed yet${status}` }
+    : {
+        class: classes,
+        tabindex: "0",
+        role: "button",
+        "aria-label": `Open card: ${node.title}${status}`,
+        "aria-pressed": String(Boolean(node.selected || node.current)),
+      };
+  const g = svg("g", { ...attrs, transform: `translate(${node.x},${node.y})`, "data-id": node.id }, group);
+  svg("title", {}, g).textContent = node.title + status;
+  svg("rect", { class: "dfc-ring", x: -5, y: -5, width: w + 10, height: h + 10, rx: 12, ry: 12 }, g);
+  svg("rect", { class: "dfc-card", width: w, height: h, rx: 8, ry: 8 }, g);
+  if (STATUS_TEXT[node.status]) drawBadge(g, node.status, w);
   const text = svg("text", { x: w / 2, y: h / 2 - ((node.lines.length - 1) * lh) / 2 }, g);
   node.lines.forEach((line, index) => {
     svg("tspan", { x: w / 2, dy: index ? lh : 0, "dominant-baseline": "central" }, text).textContent = line;
   });
   return g;
+}
+
+// Corner badge: a tick for a completed branch, a half-filled disc for one in progress.
+function drawBadge(group, status, width) {
+  const g = svg("g", { class: "dfc-badge", transform: `translate(${width - BADGE_RADIUS - 5},${BADGE_RADIUS + 5})` }, group);
+  svg("circle", { r: BADGE_RADIUS }, g);
+  if (status === "complete") {
+    svg("path", { class: "dfc-badge-mark", d: "M-3.4,0.2 L-1,2.6 L3.4,-2.4" }, g);
+  } else {
+    svg("path", { class: "dfc-badge-half", d: `M0,${-BADGE_RADIUS} A${BADGE_RADIUS},${BADGE_RADIUS} 0 0 1 0,${BADGE_RADIUS} Z` }, g);
+  }
 }
 
 // "+" handle under a card. It is a sibling of the card (not nested inside it)
@@ -97,30 +118,31 @@ export default function ({ data, parentElement, setTriggerValue }) {
     const element = drawNode(nodeLayer, node, data);
     if (node.id === data.recent) element.classList.add("recent");
     elements.set(node.id, element);
-    drawAddHandle(nodeLayer, node, data);
+    if (data.editable) drawAddHandle(nodeLayer, node, data);
   }
 
   const send = (event, id) => {
     const chosen = elements.get(id);
+    const active = data.editable ? "selected" : "current";
     for (const other of elements.values()) {
-      other.classList.toggle("selected", other === chosen);
+      other.classList.toggle(active, other === chosen);
       other.setAttribute("aria-pressed", String(other === chosen));
     }
     setTriggerValue(event, id);
   };
   canvas.addEventListener("click", (event) => {
     const handle = event.target.closest(".dfc-add");
-    const element = event.target.closest(".dfc-node");
+    const element = event.target.closest(".dfc-node:not(.ghost)");
     if (handle) send("add_child", handle.getAttribute("data-id"));
     else if (element) send("select", element.getAttribute("data-id"));
   });
   canvas.addEventListener("keydown", (event) => {
-    const element = event.target.closest(".dfc-node");
+    const element = event.target.closest(".dfc-node:not(.ghost)");
     if (!element) return;
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       send("select", element.getAttribute("data-id"));
-    } else if (event.key === "+") {
+    } else if (event.key === "+" && data.editable) {
       event.preventDefault();
       send("add_child", element.getAttribute("data-id"));
     }

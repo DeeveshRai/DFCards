@@ -135,8 +135,59 @@ def card_graph(deck: Deck, selected, key, on_select, on_add_child, recent=None, 
     the callback with ``clicked_card(key, event)``. ``focus`` is the widget key of
     a Streamlit text area to focus once it is rendered (e.g. the new child form).
     """
-    data = {**layout(deck, selected, recent), "focus": focus}
+    data = {**layout(deck, selected, recent), "focus": focus, "editable": True}
     return _component(key=key, data=data, on_select_change=on_select, on_add_child_change=on_add_child)
+
+
+def revealed_layout(deck: Deck, revealed, current=None, recent=None, statuses=None):
+    """Study view: the part of the tree whose cards have been revealed.
+
+    The full layout is the container: every card already has its final
+    position, and each revealed card is popped out of it into the visible tree.
+    Cards therefore never move relative to one another as the tree grows. An
+    unrevealed ancestor of a revealed card is shown as a "?" placeholder so the
+    branch stays connected without giving away its question. The canvas is
+    cropped to what is visible.
+
+    ``statuses`` maps card IDs to "unvisited", "in_progress" or "complete" and
+    colours the cards; the card being studied is marked ``current``.
+    """
+    statuses = statuses or {}
+    container = layout(deck, recent=recent)
+    hidden = {node["id"]: node for node in container["nodes"]}
+    parent_of = {child: parent for parent, child in container["edges"]}
+    shown = {}
+    for card_id in revealed:
+        if card_id in hidden:
+            shown[card_id] = hidden.pop(card_id)
+    for card_id in list(shown):
+        parent = parent_of.get(card_id)
+        while parent is not None and parent not in shown:
+            shown[parent] = {**hidden.pop(parent), "lines": ["?"], "title": "Not revealed yet", "ghost": True}
+            parent = parent_of.get(parent)
+    if not shown:
+        return {**container, "nodes": [], "edges": [], "width": 0, "height": 0, "editable": False}
+    nodes = [shown[node["id"]] for node in container["nodes"] if node["id"] in shown]  # Keep preorder.
+    left = min(node["x"] for node in nodes) - MARGIN
+    nodes = [{**node, "x": round(node["x"] - left, 1), "ghost": node.get("ghost", False),
+              "status": statuses.get(node["id"], "unvisited"), "current": node["id"] == current}
+             for node in nodes]
+    return {
+        **container,
+        "nodes": nodes,
+        "edges": [edge for edge in container["edges"] if edge[0] in shown and edge[1] in shown],
+        "width": round(max(node["x"] for node in nodes) + NODE_WIDTH + MARGIN, 1),
+        "height": max(node["y"] for node in nodes) + NODE_HEIGHT + MARGIN,
+        "recent": recent if recent in shown else None,
+        "selected": current if current in revealed else None,  # Scrolled into view.
+        "editable": False,
+    }
+
+
+def study_graph(deck: Deck, revealed, current, key, on_select, recent=None, statuses=None):
+    """Draw the revealed part of the tree; clicking a revealed card runs ``on_select``."""
+    data = {**revealed_layout(deck, revealed, current, recent, statuses), "focus": None}
+    return _component(key=key, data=data, on_select_change=on_select)
 
 
 def clicked_card(key, event="select"):
